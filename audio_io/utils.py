@@ -1,5 +1,3 @@
-# audio_io/utils.py
-
 from __future__ import annotations
 from datetime import datetime
 from pathlib import Path
@@ -17,12 +15,13 @@ def ensure_dir(path: Path | str) -> Path:
     """
     if isinstance(path, str):
         path = Path(path)
-        
+
     if path.exists():
         if not path.is_dir():
             raise NotADirectoryError(path)
     else:
         path.mkdir(parents=True, exist_ok=True)
+
     return path
 
 def timestamp(fmt: str = "%Y-%m-%d_%H-%M-%S") -> str:
@@ -51,7 +50,7 @@ def build_path(base: Path | str, name: str, ext: str) -> Path:
     if isinstance(base, str):
         base = Path(base)
 
-    full_path = base / f"{name}.{ext}" # Creates a Path object and '/' is overwritten by pathlib
+    full_path = base / f"{name}.{ext}" # Creates a Path (pathlib) object
     return full_path
 
 
@@ -87,4 +86,5 @@ def is_audio_file(path: Path | str, exts: Tuple[str, ...] = ("wav", "flac", "mp3
         path = Path(path)
 
     suffix = path.suffix.lstrip('.')
+
     return True if suffix in exts else False

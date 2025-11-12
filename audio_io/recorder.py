@@ -1,15 +1,14 @@
-# audio_io/recorder.py
-
-import queue
-import threading
-import datetime
-import pathlib
-
-from audio_io import utils
-
 import sounddevice as sd
 import soundfile as sf
 import numpy as np
+import queue
+import threading
+import time
+from pathlib import Path
+
+# Import the helper functions from the utils.py file in the same directory
+from .utils import ensure_dir, next_recording_path
+
 
 class Recorder:
     """Handles microphone recording and saving audio to WAV files."""
@@ -24,34 +23,41 @@ class Recorder:
             dtype (str): Sample data type, e.g., 'int16'.
             out_dir (str): Directory where recordings will be saved.
         """
-        self.sr = sr
+        self.samplerate = sr
         self.channels = channels
         self.dtype = dtype
-        self.out_dir = utils.ensure_dir(out_dir) # creates a Path object
+        self.out_dir = ensure_dir(Path(out_dir))  # Use ensure_dir from utils
 
+        self.recording = False
         self.q = queue.Queue()
-        self.q.maxsize(16)
-        self._lock = threading.Lock()
-        self._active = False
-        self._writer = None
         self.stream = None
-        self.current_path = None
+        self.file = None
+        self.filepath = None
+        self.drain_thread = None
 
     def _callback(self, indata, frames, time_info, status):
         """
         Internal callback executed by sounddevice for each incoming audio block.
-
-        Args:
-            indata (numpy.ndarray): The recorded audio data block.
-            frames (int): Number of frames in this block.
-            time_info (dict): Timing information.
-            status (sounddevice.CallbackFlags): Indicates under/overflow or other warnings.
         """
         if status:
             print(status)
-        if self.q.full():
-            return
-        self.q.put_nowait(indata.copy())
+        if self.recording:
+            self.q.put(indata.copy())
+
+    def _drain(self):
+        """
+        Continuously write buffered audio data to disk while recording.
+
+        This method runs in a background thread until a `None` is put in the queue.
+        """
+        while True:
+            try:
+                data = self.q.get()
+                if data is None:  # Sentinel value to stop the thread
+                    break
+                self.file.write(data)
+            except Exception as e:
+                print(f"Error in drain thread: {e}")
 
     def start(self) -> str:
         """
@@ -60,34 +66,38 @@ class Recorder:
         Returns:
             str: Path to the output WAV file being written.
         """
-        with self._lock:
-            if self._active == True:
-                return str(self.current_path)
-            
-            # Create new Path object for current recording
-            self.current_path = utils.next_recording_path(self.out_dir)
+        if self.recording:
+            print("Already recording.")
+            return ""
 
-            # Creater writer (SoundFile) object
-            self.writer = sf.SoundFile(file=str(self.current_path), mode='w',
-                                  samplerate=self.sr, channels=self.channels,
-                                  subtype="PCM_16")
+        self.filepath = next_recording_path(self.out_dir)  # Use util to get path
 
-            # Empty Queue (non-blocking)
-            while not self.q.empty():
-                self.q.get_nowait
+        # Open the sound file
+        self.file = sf.SoundFile(
+            self.filepath,
+            mode='x',
+            samplerate=self.samplerate,
+            channels=self.channels,
+            subtype='PCM_16'  # Common for int16
+        )
 
-            # Create input-stream object
-            self.stream = sd.InputStream(samplerate=self.sr, channels=self.channels, 
-                                         dtype=self.dtype)
+        self.q.queue.clear()  # Clear any old data
+        self.recording = True
 
+        # Start the drain thread
+        self.drain_thread = threading.Thread(target=self._drain)
+        self.drain_thread.start()
 
-    def _drain(self):
-        """
-        Continuously write buffered audio data to disk while recording.
+        # Start the audio stream
+        self.stream = sd.InputStream(
+            samplerate=self.samplerate,
+            channels=self.channels,
+            dtype=self.dtype,
+            callback=self._callback
+        )
+        self.stream.start()
 
-        This method runs in a background thread until `stop()` is called.
-        """
-        pass
+        return str(self.filepath)
 
     def stop(self) -> str:
         """
@@ -96,4 +106,29 @@ class Recorder:
         Returns:
             str: Path to the saved WAV file.
         """
-        pass
+        if not self.recording:
+            print("Not recording.")
+            return ""
+
+        print("Stopping recording...")
+        self.recording = False
+
+        # Stop the audio stream
+        if self.stream:
+            self.stream.stop()
+            self.stream.close()
+            self.stream = None
+
+        # Stop the drain thread by sending the sentinel
+        if self.drain_thread:
+            self.q.put(None)
+            self.drain_thread.join()  # Wait for thread to finish
+            self.drain_thread = None
+
+        # Close the file
+        if self.file:
+            self.file.close()
+            self.file = None
+
+        print(f"Recording saved to {self.filepath}")
+        return str(self.filepath)
